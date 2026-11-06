@@ -10,11 +10,17 @@ AI 悬浮球
 依赖：PySide6；本机需已安装并配置好 Claude Code（含 ccswitch）。
 """
 
+import base64
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import uuid
+import winreg
 from pathlib import Path
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from PySide6.QtCore import QPoint, QRectF, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -31,9 +37,12 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QToolTip,
     QVBoxLayout,
@@ -43,6 +52,9 @@ from PySide6.QtWidgets import (
 BALL_SIZE = 84
 CLAUDE_TIMEOUT = 600  # 秒，生成代码可能较慢
 OUTPUT_SUFFIX = "_修改版"
+
+# Ed25519 公钥（十六进制），用于校验 license.dat 签名。私钥在开发者 keygen.py 里，切勿外传。
+PUBLIC_KEY_HEX = "4a6e644349f6802a38cc6cfc7e7005b734aab350e47e59a79733f1c286826cbf"
 
 SYSTEM_PROMPT = """\
 你是一名资深 Python 工程师。下面给你一个 .py 文件的内容，其中以注释、docstring 或伪代码的形式描述了需求。
@@ -70,6 +82,56 @@ def read_py_text(path: str) -> str:
         except (UnicodeDecodeError, LookupError):
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+def get_machine_code() -> str:
+    """读取本机机器码（MachineGuid 的 SHA256，格式 XXXX-XXXX-XXXX-XXXX）。"""
+    guid = None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
+        ) as key:
+            guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+    except OSError:
+        guid = None
+    if not guid:
+        guid = "node-" + str(uuid.getnode())
+    digest = hashlib.sha256(guid.strip().encode("utf-8")).hexdigest().upper()
+    code = digest[:16]
+    return "-".join(code[i:i + 4] for i in range(0, 16, 4))
+
+
+def license_file_path() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home())
+    return Path(base) / "FloatBall" / "license.dat"
+
+
+def verify_license_data(lic_machine_code: str, signature_b64: str) -> bool:
+    """用内置公钥校验签名（私钥仅在开发者 keygen.py 中）。"""
+    if not lic_machine_code or not signature_b64:
+        return False
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(PUBLIC_KEY_HEX))
+        pub.verify(base64.b64decode(signature_b64), lic_machine_code.encode("utf-8"))
+        return True
+    except Exception:  # noqa: BLE001  # 签名不匹配或格式错误
+        return False
+
+
+def check_license_file(path) -> bool:
+    """读取 license 文件并校验是否与本机机器码匹配。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    lic_mc = data.get("machine_code", "")
+    if lic_mc != get_machine_code():
+        return False
+    return verify_license_data(lic_mc, data.get("signature", ""))
+
+
+def is_licensed() -> bool:
+    return check_license_file(license_file_path())
 
 
 def _decode_stdout(raw: bytes) -> str:
@@ -356,13 +418,90 @@ class AgreementDialog(QDialog):
         self.btn_exit.clicked.connect(self.reject)
 
 
+class ActivationDialog(QDialog):
+    """首次激活：展示本机机器码，导入 license.dat 校验。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("激活授权")
+        self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.setMinimumWidth(430)
+
+        self.machine_code = get_machine_code()
+
+        title = QLabel("请先激活本产品")
+        f = title.font()
+        f.setBold(True)
+        f.setPointSize(12)
+        title.setFont(f)
+
+        hint = QLabel("下方是本机的机器码，请把它发给开发者，获取 license.dat 后导入。")
+        hint.setWordWrap(True)
+
+        self.code_edit = QLineEdit(self.machine_code)
+        self.code_edit.setReadOnly(True)
+        self.code_edit.setAlignment(Qt.AlignCenter)
+        cf = self.code_edit.font()
+        cf.setBold(True)
+        cf.setPointSize(14)
+        self.code_edit.setFont(cf)
+
+        btn_copy = QPushButton("复制机器码")
+        btn_import = QPushButton("导入 license.dat")
+        btn_import.setDefault(True)
+
+        row = QHBoxLayout()
+        row.addWidget(btn_copy)
+        row.addWidget(btn_import)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addWidget(self.code_edit)
+        layout.addLayout(row)
+
+        btn_copy.clicked.connect(self._copy)
+        btn_import.clicked.connect(self._import)
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.machine_code)
+        QToolTip.showText(self.mapToGlobal(self.code_edit.pos()), "已复制", self)
+
+    def _import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 license.dat", str(Path.home()), "授权文件 (*.dat);;所有文件 (*)"
+        )
+        if not path:
+            return
+        if check_license_file(path):
+            try:
+                dst = license_file_path()
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(Path(path).read_text(encoding="utf-8"), encoding="utf-8")
+            except OSError:
+                QMessageBox.warning(self, "激活失败", "授权文件已通过校验，但保存失败，请检查权限。")
+                return
+            QMessageBox.information(self, "激活成功", "授权成功，感谢使用！")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "激活失败", "授权文件无效，或与当前电脑的机器码不匹配。")
+
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # 1) 用户协议（每次启动先弹出）
     dlg = AgreementDialog()
     if dlg.exec() != QDialog.Accepted:
         sys.exit(0)
+
+    # 2) 激活校验（未激活时弹出）
+    if not is_licensed():
+        act = ActivationDialog()
+        if act.exec() != QDialog.Accepted:
+            sys.exit(0)
 
     ball = FloatingBall()
     ball.show()

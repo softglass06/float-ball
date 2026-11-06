@@ -3,3 +3,8 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# 开发者专用（含私钥，切勿提交/上传到公开仓库）
+keygen.py
+keygen_*.py
+*.pem
