@@ -27,7 +27,18 @@ from PySide6.QtGui import (
     QPainter,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QToolTip,
+    QVBoxLayout,
+    QWidget,
+)
 
 BALL_SIZE = 84
 CLAUDE_TIMEOUT = 600  # 秒，生成代码可能较慢
@@ -304,9 +315,55 @@ class FloatingBall(QWidget):
         QTimer.singleShot(1200, self._process_next)
 
 
+AGREEMENT_TEXT = (
+    "该产品只能用于探讨和研究，\n"
+    "严禁用于商业和考试，\n"
+    "违反者后果自负。\n\n"
+    "（最终解释权归作者所有）"
+)
+
+
+class AgreementDialog(QDialog):
+    """启动时首先弹出的用户协议，必须勾选同意才能进入使用。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("用户协议")
+        self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+
+        label = QLabel(AGREEMENT_TEXT)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.PlainText)
+
+        self.check = QCheckBox("我已阅读并同意以上协议")
+        self.btn_agree = QPushButton("同意并进入")
+        self.btn_agree.setEnabled(False)
+        self.btn_exit = QPushButton("退出")
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_agree)
+        btn_row.addWidget(self.btn_exit)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(label)
+        layout.addWidget(self.check)
+        layout.addLayout(btn_row)
+
+        self.check.toggled.connect(self.btn_agree.setEnabled)
+        self.btn_agree.clicked.connect(self.accept)
+        self.btn_exit.clicked.connect(self.reject)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    dlg = AgreementDialog()
+    if dlg.exec() != QDialog.Accepted:
+        sys.exit(0)
+
     ball = FloatingBall()
     ball.show()
     sys.exit(app.exec())
