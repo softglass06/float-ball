@@ -17,10 +17,12 @@ import os
 import subprocess
 import sys
 import uuid
-import winreg
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+if sys.platform == "win32":
+    import winreg
+
+from _ed25519 import verify as ed25519_verify
 
 from PySide6.QtCore import QPoint, QRectF, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -84,26 +86,52 @@ def read_py_text(path: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _machine_guid() -> str:
+    """返回一个尽量稳定的本机标识。
+
+    Windows 用注册表 MachineGuid；macOS 用 IOPlatformUUID；其他回退到网卡 MAC。
+    """
+    if sys.platform == "win32":
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
+            ) as key:
+                guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+            if guid:
+                return guid.strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, timeout=10,
+            ).stdout.decode("utf-8", "replace")
+            for line in out.splitlines():
+                if "IOPlatformUUID" in line:
+                    val = line.split("=", 1)[-1].strip().strip('"')
+                    if val:
+                        return val
+        except Exception:
+            pass
+    return "node-" + str(uuid.getnode())
+
+
 def get_machine_code() -> str:
-    """读取本机机器码（MachineGuid 的 SHA256，格式 XXXX-XXXX-XXXX-XXXX）。"""
-    guid = None
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
-        ) as key:
-            guid, _ = winreg.QueryValueEx(key, "MachineGuid")
-    except OSError:
-        guid = None
-    if not guid:
-        guid = "node-" + str(uuid.getnode())
-    digest = hashlib.sha256(guid.strip().encode("utf-8")).hexdigest().upper()
+    """机器码 = 稳定本机标识的 SHA256 前 16 位，格式 XXXX-XXXX-XXXX-XXXX。"""
+    guid = _machine_guid()
+    digest = hashlib.sha256(guid.encode("utf-8")).hexdigest().upper()
     code = digest[:16]
     return "-".join(code[i:i + 4] for i in range(0, 16, 4))
 
 
 def license_file_path() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "FloatBall" / "license.dat"
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(Path.home())
+        return Path(base) / "FloatBall" / "license.dat"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "FloatBall" / "license.dat"
+    return Path.home() / ".floatball" / "license.dat"
 
 
 def verify_license_data(lic_machine_code: str, signature_b64: str) -> bool:
@@ -111,9 +139,9 @@ def verify_license_data(lic_machine_code: str, signature_b64: str) -> bool:
     if not lic_machine_code or not signature_b64:
         return False
     try:
-        pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(PUBLIC_KEY_HEX))
-        pub.verify(base64.b64decode(signature_b64), lic_machine_code.encode("utf-8"))
-        return True
+        pub = bytes.fromhex(PUBLIC_KEY_HEX)
+        sig = base64.b64decode(signature_b64)
+        return ed25519_verify(pub, lic_machine_code.encode("utf-8"), sig)
     except Exception:  # noqa: BLE001  # 签名不匹配或格式错误
         return False
 
@@ -154,18 +182,36 @@ def _parse_json(text: str):
         return json.loads(text[i:j + 1])
 
 
+def _login_shell() -> str:
+    """macOS/Linux 上从 GUI 双击启动的程序拿不到终端 PATH，需要用登录 shell
+    运行 claude 才能补全 PATH（覆盖 homebrew / nvm 等不同安装方式）。"""
+    for sh in ("/bin/zsh", "/bin/bash"):
+        if os.path.exists(sh):
+            return sh
+    return "/bin/sh"
+
+
 def call_claude(prompt: str) -> str:
     """调用本机 claude -p，返回最终文本（result 字段）。"""
-    # Windows 下 claude 是 .cmd 批处理脚本，必须 shell=True 才能被 cmd.exe 解析到。
-    cmd = "claude -p --output-format json"
     try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            timeout=CLAUDE_TIMEOUT,
-            shell=True,
-        )
+        if sys.platform == "win32":
+            # Windows 下 claude 是 .cmd 批处理脚本，必须 shell=True 才能被 cmd.exe 解析到。
+            cmd = "claude -p --output-format json"
+            proc = subprocess.run(
+                cmd,
+                input=prompt.encode("utf-8"),
+                capture_output=True,
+                timeout=CLAUDE_TIMEOUT,
+                shell=True,
+            )
+        else:
+            # -l 加载 ~/.zprofile，-i 再加载 ~/.zshrc；rc 里若有杂音，_parse_json 会兜底。
+            proc = subprocess.run(
+                [_login_shell(), "-lic", "claude -p --output-format json"],
+                input=prompt.encode("utf-8"),
+                capture_output=True,
+                timeout=CLAUDE_TIMEOUT,
+            )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"claude 生成超时（>{CLAUDE_TIMEOUT}s）。")
 

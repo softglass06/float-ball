@@ -39,6 +39,15 @@ build.bat
 
 生成物在 `dist\FloatBall.exe`，双击即可运行。可以自行把它重命名成任意名字（如 `悬浮球.exe`），PyInstaller 单文件 exe 改名不影响运行。
 
+## 构建 Mac 版（.app）
+
+PyInstaller 不能跨平台交叉编译，Mac 版必须在 macOS 上打包。仓库内置 GitHub Actions 工作流 `.github/workflows/build-macos.yml`，用免费 macOS 环境自动打包，无需本机有 Mac：
+
+1. 把代码推到 GitHub，到 **Actions** 页 → 左侧 `build-macos` → **Run workflow** 手动触发；
+2. 跑完后在产物里下载 `FloatBall-mac.zip` 或 `FloatBall.dmg`，微信发给 Mac 用户即可（`.app` 可直接重命名成「悬浮球.app」）。
+
+首次在对方 Mac 上双击会被 Gatekeeper 拦截（未签名），需右键（或按住 Control 点）→「打开」→ 再点「打开」一次即可，之后正常双击。机器码在 Mac 上取 IOPlatformUUID，首次会弹激活窗，同样把机器码发给你用 keygen 生成 `license.dat`。
+
 ## 已知限制 / 说明
 
 - 生成的文件名固定为 `原名_修改版.py`，同名会**覆盖**旧结果。
